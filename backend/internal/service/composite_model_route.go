@@ -29,6 +29,7 @@ const (
 // CompositeModelOwnership identifies the concrete provider that exposes a
 // public model through an account-level exact mapping.
 type CompositeModelOwnership struct {
+	Platforms      []string // exact model owners within the requested group
 	TargetPlatform string
 	Matched        bool
 	Ambiguous      bool
