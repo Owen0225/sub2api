@@ -16,11 +16,14 @@ import (
 // Gin context keys used by Ops error logger for capturing upstream error details.
 // These keys are set by gateway services and consumed by handler/ops_error_logger.go.
 const (
-	OpsUpstreamStatusCodeKey   = "ops_upstream_status_code"
-	OpsUpstreamErrorMessageKey = "ops_upstream_error_message"
-	OpsUpstreamErrorDetailKey  = "ops_upstream_error_detail"
-	OpsUpstreamErrorsKey       = "ops_upstream_errors"
-	OpsUpstreamModelKey        = "ops_upstream_model"
+	// OpsRoutingCapacityLimitedKey marks exhausted scheduling capacity, including
+	// handlers that intentionally sanitize the client-facing error message.
+	OpsRoutingCapacityLimitedKey = "ops_routing_capacity_limited"
+	OpsUpstreamStatusCodeKey     = "ops_upstream_status_code"
+	OpsUpstreamErrorMessageKey   = "ops_upstream_error_message"
+	OpsUpstreamErrorDetailKey    = "ops_upstream_error_detail"
+	OpsUpstreamErrorsKey         = "ops_upstream_errors"
+	OpsUpstreamModelKey          = "ops_upstream_model"
 
 	// Optional stage latencies (milliseconds) for troubleshooting and alerting.
 	OpsAuthLatencyMsKey      = "ops_auth_latency_ms"

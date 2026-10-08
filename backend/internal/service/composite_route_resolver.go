@@ -67,6 +67,30 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 				return decision, fmt.Errorf("resolve account model ownership: %w", err)
 			}
 		} else if ownership.Ambiguous {
+			// Recognizable text models have a canonical primary. Other owners
+			// are considered only by the bounded cross-provider failover plan.
+			if platform, ok := DetectModelPlatform(model); ok && compositeTextEndpoint(endpoint) {
+				source := CompositeRouteSourceDetector
+				// If all native accounts were disabled/removed, start with a
+				// configured compatible owner instead of a terminal model-not-found.
+				owners := orderedCompositeOwners(ownership.Platforms)
+				if len(owners) > 0 {
+					nativeOwned := false
+					for _, owner := range owners {
+						if owner == platform {
+							nativeOwned = true
+							break
+						}
+					}
+					if !nativeOwned {
+						platform = owners[0]
+						source = CompositeRouteSourceAccount
+					}
+				}
+				return CompositeRouteDecision{Matched: true, Source: source,
+					GroupID: groupID, PublicModel: model, TargetPlatform: platform,
+					UpstreamModel: model, Endpoint: endpoint}, nil
+			}
 			decision.Reason = "model is exposed by multiple provider platforms"
 			return decision, nil
 		} else if ownership.Matched {
@@ -173,4 +197,74 @@ func matchCompositeRoute(routes []CompositeModelRoute, model, endpoint string) (
 		return a.route.ID < b.route.ID
 	})
 	return candidates[0].route, true
+}
+
+// ResolveCandidates limits automatic failover to exact model owners in this
+// group. Explicit routes remain pinned; unknown aliases remain fail-closed.
+func (r *CompositeRouteResolver) ResolveCandidates(ctx context.Context, groupID int64, model, endpoint string) ([]CompositeRouteDecision, error) {
+	primary, err := r.Resolve(ctx, groupID, model, endpoint)
+	if err != nil || !primary.Matched {
+		return nil, err
+	}
+	decisions := []CompositeRouteDecision{primary}
+	if primary.Source == CompositeRouteSourceExplicit || !compositeTextEndpoint(endpoint) || r == nil || r.modelOwnershipResolver == nil {
+		return decisions, nil
+	}
+	if _, ok := DetectModelPlatform(model); !ok {
+		return decisions, nil
+	}
+	ownership, err := r.modelOwnershipResolver(ctx, groupID, strings.TrimSpace(model))
+	if err != nil {
+		return decisions, nil
+	} // preserve canonical-provider availability on catalog errors
+	platforms := orderedCompositeOwners(ownership.Platforms)
+	seen := map[string]bool{primary.TargetPlatform: true}
+	for _, platform := range platforms {
+		if seen[platform] || !compositeTextPlatform(platform) {
+			continue
+		}
+		seen[platform] = true
+		candidate := primary
+		candidate.TargetPlatform = platform
+		candidate.Source = CompositeRouteSourceAccount
+		decisions = append(decisions, candidate)
+	}
+	return decisions, nil
+}
+
+func compositeTextEndpoint(endpoint string) bool {
+	switch endpoint {
+	case CompositeRouteEndpointMessages, CompositeRouteEndpointChatCompletions, CompositeRouteEndpointResponses:
+		return true
+	default:
+		return false
+	}
+}
+
+func compositeTextPlatform(platform string) bool {
+	switch platform {
+	case PlatformAnthropic, PlatformOpenAI, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo:
+		return true
+	default:
+		return false
+	}
+}
+
+func orderedCompositeOwners(owners []string) []string {
+	platforms := make([]string, 0, len(owners))
+	for _, platform := range owners {
+		if compositeTextPlatform(platform) {
+			platforms = append(platforms, platform)
+		}
+	}
+	sort.Slice(platforms, func(i, j int) bool {
+		if platforms[i] == PlatformOpenCodeGo {
+			return platforms[j] != PlatformOpenCodeGo
+		}
+		if platforms[j] == PlatformOpenCodeGo {
+			return false
+		}
+		return platforms[i] < platforms[j]
+	})
+	return platforms
 }
