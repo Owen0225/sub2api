@@ -453,3 +453,55 @@ func TestCompositeRouteResolverExplicitRoutesCoverBucketTwoProviders(t *testing.
 		})
 	}
 }
+
+// A well-known provider model retains its primary when compatible gateways
+// expose the same model, so availability failover can start deterministically.
+func TestCompositeRouteResolverKnownModelHasPrimaryDespiteMultipleOwners(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{Ambiguous: true}, nil
+	})
+	for _, endpoint := range []string{CompositeRouteEndpointMessages, CompositeRouteEndpointChatCompletions, CompositeRouteEndpointResponses} {
+		decision, err := resolver.Resolve(context.Background(), 7, "glm-5.3", endpoint)
+		require.NoError(t, err)
+		require.True(t, decision.Matched)
+		require.Equal(t, PlatformZhipu, decision.TargetPlatform)
+	}
+}
+
+func TestCompositeCandidatesOnlyUseExactOwnersAndKeepExplicitRoutesPinned(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{Ambiguous: true, Platforms: []string{PlatformAnthropic, PlatformOpenCodeGo, PlatformZhipu, PlatformOpenCodeGo}}, nil
+	})
+	decisions, err := resolver.ResolveCandidates(context.Background(), 7, "glm-5.3", CompositeRouteEndpointChatCompletions)
+	require.NoError(t, err)
+	require.Len(t, decisions, 3)
+	require.Equal(t, PlatformZhipu, decisions[0].TargetPlatform)
+	require.Equal(t, PlatformOpenCodeGo, decisions[1].TargetPlatform)
+	require.Equal(t, PlatformAnthropic, decisions[2].TargetPlatform)
+	require.Equal(t, CompositeRouteSourceAccount, decisions[1].Source)
+	unknown, err := resolver.ResolveCandidates(context.Background(), 7, "shared-alias", CompositeRouteEndpointChatCompletions)
+	require.NoError(t, err)
+	require.Empty(t, unknown)
+	nonText, err := resolver.ResolveCandidates(context.Background(), 7, "glm-5.3", CompositeRouteEndpointImages)
+	require.NoError(t, err)
+	require.Empty(t, nonText)
+	resolver.repo = compositeRouteRepoStub{routes: []CompositeModelRoute{{ID: 1, GroupID: 7, Enabled: true, PublicModel: "glm-5.3", MatchType: CompositeRouteMatchExact, Endpoint: CompositeRouteEndpointAny, TargetPlatform: PlatformOpenCodeGo}}}
+	pinned, err := resolver.ResolveCandidates(context.Background(), 7, "glm-5.3", CompositeRouteEndpointMessages)
+	require.NoError(t, err)
+	require.Len(t, pinned, 1)
+	require.Equal(t, PlatformOpenCodeGo, pinned[0].TargetPlatform)
+}
+
+func TestCompositeCandidatesSkipUnconfiguredNativePlatform(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{Ambiguous: true, Platforms: []string{PlatformAnthropic, PlatformOpenCodeGo}}, nil
+	})
+	decisions, err := resolver.ResolveCandidates(context.Background(), 7, "glm-5.3", CompositeRouteEndpointMessages)
+	require.NoError(t, err)
+	require.Len(t, decisions, 2)
+	require.Equal(t, PlatformOpenCodeGo, decisions[0].TargetPlatform)
+	require.Equal(t, PlatformAnthropic, decisions[1].TargetPlatform)
+}

@@ -1512,6 +1512,10 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 	}
 
 	ownership := CompositeModelOwnership{}
+	for platform := range platforms {
+		ownership.Platforms = append(ownership.Platforms, platform)
+	}
+	sort.Strings(ownership.Platforms)
 	if len(platforms) == 1 {
 		for platform := range platforms {
 			ownership.TargetPlatform = platform
