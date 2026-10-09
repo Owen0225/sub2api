@@ -6,7 +6,8 @@
 ## 分支约定
 
 - `main`：已验证的上游代码与本仓库补丁，供后续构建使用。
-- `deployed/composite-20261008`：当前部署的源码快照，提交 `554b8ae72ddfa4c67babb750066695a2dcad5d6a`，基于上游 `0363b8cdba8cec3e2ba4b2dbd49c4481143fa55d`。此分支保持不变。
+- `deployed/0.2.15-c85c184f`：当前部署的源码快照，提交 `c85c184f389baa5aa586be32ad050da281e6ee9a`，基于上游 0.2.15。经用户确认升级，健康检查和 18 个隔离回退场景均通过。
+- `deployed/composite-20261008`：上一部署版本的源码快照，提交 `554b8ae72ddfa4c67babb750066695a2dcad5d6a`，基于上游 `0363b8cdba8cec3e2ba4b2dbd49c4481143fa55d`。部署快照分支均保持不变。
 - `maintenance/*`：同步上游或调整补丁的临时分支，通过验证后合并到 `main`。
 - 本地 `origin` 指向维护仓库，`upstream` 指向原项目。保留上游历史与许可证，不强制覆盖已发布历史。
 
