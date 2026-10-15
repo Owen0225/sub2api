@@ -82,3 +82,37 @@ func TestResolveOpenAIMessagesDispatchMappedModel_CompositeCNTargetsSkipGroupMap
 	require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(c, apiKey, "claude-sonnet-4-5-20250929"),
 		"composite → opencode_go 不得注入 openai 默认 gpt-5.x 映射")
 }
+
+// composite 解析到 openai 目标同样不得注入 gpt-5.x 家族默认映射：OpenAI 兼容
+// 账号可能原生服务 claude-* 模型（Anthropic 兼容中转）。默认值会把选号模型
+// 替换成 gpt-5.3-codex 等名字，账号白名单因缺少该 gpt 名选号失败，客户端收到
+// 404 model_not_found（错误信息仍是原始 claude 模型名）。模型改写统一交给
+// composite 路由 upstream_model 与账号级 model_mapping。
+func TestResolveOpenAIMessagesDispatchMappedModel_CompositeOpenAITargetSkipsDefaultMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newCompositeOpenAICtx := func(model string) (*gin.Context, *service.APIKey) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite, AllowMessagesDispatch: true}}
+		ensureCompositeTargetPlatform(c, apiKey, model)
+		return c, apiKey
+	}
+
+	// claude-sonnet/opus/haiku 家族不再被默认改写成 gpt-5.3-codex / gpt-5.4 /
+	// gpt-5.4-mini，选号使用原始模型名，白名单命中的账号可直达。
+	for _, model := range []string{"claude-sonnet-5-5", "claude-opus-5", "claude-haiku-4-5"} {
+		c, apiKey := newCompositeOpenAICtx(model)
+		require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(c, apiKey, model), "model=%s", model)
+	}
+
+	// 非 composite 的 openai 分组保持默认映射，不随本修复放宽。
+	openaiAPIKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformOpenAI}}
+	require.Equal(t, "gpt-5.3-codex", resolveOpenAIMessagesDispatchMappedModel(nil, openaiAPIKey, "claude-sonnet-5-5"))
+
+	// composite 未解析出目标平台时同样不注入（fail closed 与旧行为一致）。
+	cNone, _ := gin.CreateTestContext(httptest.NewRecorder())
+	cNone.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(cNone,
+		&service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}, "claude-sonnet-5-5"))
+}

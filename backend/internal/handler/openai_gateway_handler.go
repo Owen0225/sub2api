@@ -200,13 +200,13 @@ func resolveOpenAIMessagesDispatchMappedModel(c *gin.Context, apiKey *service.AP
 	if apiKey == nil || apiKey.Group == nil {
 		return ""
 	}
-	// composite 解析到 grok/CN/OpenCode 目标时调度级映射不适用（Group 级映射的
-	// gpt-5.x 默认值是 openai 专属,发给这些上游必错）,模型改写交给账号级 model_mapping。
-	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
-		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform)) {
-			return ""
-		}
+	// composite 分组一律不走调度级映射：gpt-5.x 家族默认值是 openai 上游专属，
+	// 而 composite 的 OpenAI 兼容账号完全可能原生服务 claude-* 模型（Anthropic
+	// 兼容中转）。默认值会替换原始模型名参与选号，账号白名单因缺少该 gpt 名
+	// 选号失败并报 404 model_not_found（错误信息仍是客户端原始模型名）。composite
+	// 的模型改写统一交给路由 upstream_model 与账号级 model_mapping。
+	if apiKey.Group.Platform == service.PlatformComposite {
+		return ""
 	}
 	return strings.TrimSpace(apiKey.Group.ResolveMessagesDispatchModel(requestedModel))
 }
