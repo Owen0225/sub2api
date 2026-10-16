@@ -121,15 +121,15 @@ func TestResolveCompositeModelOwnershipFlagsOpenAIGatewayOAuthClaimants(t *testi
 
 	withOAuth, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "gpt-6-astra")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true, OpenAIGatewayOAuthClaimed: true}, withOAuth)
+	require.Equal(t, CompositeModelOwnership{Platforms: []string{PlatformDeepseek, PlatformOpenAI}, Ambiguous: true, OpenAIGatewayOAuthClaimed: true}, withOAuth)
 
 	apiKeyOnly, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "apikey-only")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, apiKeyOnly)
+	require.Equal(t, CompositeModelOwnership{Platforms: []string{PlatformDeepseek, PlatformOpenAI}, Ambiguous: true}, apiKeyOnly)
 
 	anthropicFamily, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "claude-opus-4-8")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, anthropicFamily)
+	require.Equal(t, CompositeModelOwnership{Platforms: []string{PlatformAnthropic, PlatformAntigravity}, Ambiguous: true}, anthropicFamily)
 }
 
 func TestNewGatewayServiceWiresCompositeModelOwnershipResolver(t *testing.T) {
