@@ -5,7 +5,33 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
+
+const (
+	// CompositeRouteReasonAmbiguous marks a model whose explicit account
+	// mappings span several provider platforms.
+	CompositeRouteReasonAmbiguous = "model is exposed by multiple provider platforms"
+	// CompositeRouteReasonOAuthAmbiguous is the ambiguous case where a claimant
+	// holds an OAuth / setup-token credential that only the OpenAI gateway can
+	// carry, and the model-name fallback would also pick an OpenAI-gateway
+	// platform. The unresolved request would land in the Anthropic gateway
+	// handler and select those credentials, so this group misconfiguration must
+	// be rejected instead of guessing a platform from the model name.
+	CompositeRouteReasonOAuthAmbiguous = "model is exposed by multiple provider platforms including OAuth accounts"
+)
+
+// OAuthAmbiguous reports whether the request must be rejected because the
+// cross-platform ownership involves OpenAI-gateway OAuth credentials.
+func (d CompositeRouteDecision) OAuthAmbiguous() bool {
+	return !d.Matched && d.Reason == CompositeRouteReasonOAuthAmbiguous
+}
+
+// AmbiguousMessage is the client-facing rejection for an OAuthAmbiguous decision.
+func (d CompositeRouteDecision) AmbiguousMessage() string {
+	return fmt.Sprintf("Model %q is mapped on multiple provider platforms in this group; configure an explicit composite route", d.PublicModel)
+}
 
 type CompositeRouteResolver struct {
 	repo                   CompositeModelRouteRepository
@@ -115,7 +141,14 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 		} else if ownership.Ambiguous {
 			// Recognizable text models have a canonical primary. Other owners
 			// are considered only by the bounded cross-provider failover plan.
-			if platform, ok := DetectModelPlatform(model); ok && compositeTextEndpoint(endpoint) {
+			guessed, guessable := DetectModelPlatform(model)
+			if ownership.OpenAIGatewayOAuthClaimed && guessable && domain.UsesOpenAIGateway(guessed) {
+				// 未解析的请求由下游 handler 按模型名前缀兜底选平台；只有兜底落在
+				// OpenAI 网关族时，OpenAI 网关 OAuth 声明方才会被误送进 Anthropic 管线。
+				decision.Reason = CompositeRouteReasonOAuthAmbiguous
+				return decision, nil
+			}
+			if guessable && compositeTextEndpoint(endpoint) {
 				source := CompositeRouteSourceDetector
 				// If all native accounts were disabled/removed, start with a
 				// configured compatible owner instead of a terminal model-not-found.
@@ -123,21 +156,26 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 				if len(owners) > 0 {
 					nativeOwned := false
 					for _, owner := range owners {
-						if owner == platform {
+						if owner == guessed {
 							nativeOwned = true
 							break
 						}
 					}
 					if !nativeOwned {
-						platform = owners[0]
+						guessed = owners[0]
 						source = CompositeRouteSourceAccount
 					}
 				}
 				return CompositeRouteDecision{Matched: true, Source: source,
-					GroupID: groupID, PublicModel: model, TargetPlatform: platform,
-					UpstreamModel: model, Endpoint: endpoint}, nil
+					GroupID: groupID, PublicModel: model, TargetPlatform: guessed,
+					UpstreamModel: model, Endpoint: endpoint, Reason: CompositeRouteReasonAmbiguous}, nil
 			}
-			decision.Reason = "model is exposed by multiple provider platforms"
+			decision.Reason = CompositeRouteReasonAmbiguous
+			// 未解析的请求由下游 handler 按模型名前缀兜底选平台；只有兜底落在
+			// OpenAI 网关族时，OpenAI 网关 OAuth 声明方才会被误送进 Anthropic 管线。
+			if guessed, ok := DetectModelPlatform(model); ok && ownership.OpenAIGatewayOAuthClaimed && domain.UsesOpenAIGateway(guessed) {
+				decision.Reason = CompositeRouteReasonOAuthAmbiguous
+			}
 			return decision, nil
 		} else if ownership.Matched {
 			platform := strings.TrimSpace(ownership.TargetPlatform)
@@ -249,8 +287,15 @@ func matchCompositeRoute(routes []CompositeModelRoute, model, endpoint string) (
 // group. Explicit routes remain pinned; unknown aliases remain fail-closed.
 func (r *CompositeRouteResolver) ResolveCandidates(ctx context.Context, groupID int64, model, endpoint string) ([]CompositeRouteDecision, error) {
 	primary, err := r.Resolve(ctx, groupID, model, endpoint)
-	if err != nil || !primary.Matched {
+	if err != nil {
 		return nil, err
+	}
+	if !primary.Matched {
+		// OAuth 歧义是分组配置错误，必须上抛给路由层拒绝；其余未命中按无候选处理。
+		if primary.OAuthAmbiguous() {
+			return []CompositeRouteDecision{primary}, nil
+		}
+		return nil, nil
 	}
 	decisions := []CompositeRouteDecision{primary}
 	if primary.Source == CompositeRouteSourceExplicit || !compositeTextEndpoint(endpoint) || r == nil || r.modelOwnershipResolver == nil {
