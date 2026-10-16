@@ -215,7 +215,14 @@ func TestCompositeTargetPlatformMiddlewareRejectsOnlyOAuthAmbiguousOwnership(t *
 			router.Use(compositeTargetPlatformMiddleware(resolver))
 			router.POST("/v1/responses", func(c *gin.Context) {
 				_, resolved := service.ResolvedTargetPlatformFromContext(c.Request.Context())
-				require.False(t, resolved)
+				if tc.oauthClaimed {
+					require.False(t, resolved)
+				} else {
+					// 本仓库复合回退：可识别文本模型歧义时按探测器平台解析，仅 OAuth 网关歧义被拒绝。
+					platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
+					require.True(t, ok)
+					require.Equal(t, service.PlatformOpenAI, platform)
+				}
 				c.Status(http.StatusNoContent)
 			})
 
