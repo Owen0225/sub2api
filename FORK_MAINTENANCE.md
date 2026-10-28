@@ -25,6 +25,14 @@
 
 核心回归测试位于 `backend/internal/server/routes/composite_failover_test.go`、`backend/internal/handler/composite_failover_signal_test.go` 和 `backend/internal/service/composite_route_resolver_test.go`。
 
+## v0.2.19 同步说明
+
+- 同步上游 `a3298b46e`，保留 Composite 原生优先、精确模型声明候选、显式路由固定及响应提交后不回退的行为。
+- 前端继续使用 pnpm 9 锁定依赖安装。
+- 缓存刷新回归测试改用不启动后台 worker 的夹具，避免后台刷新干扰精确调用次数断言；不修改生产逻辑。
+- 包含迁移 246–248：开启存量 Gemini/Antigravity 分组生图权限、增加受限管理密钥表、增加默认关闭的分组图片按张计费开关。部署前必须备份数据库及应用配置。
+- 应用回滚可回切旧镜像；迁移 246 修改了存量配置，回切镜像不会撤销此配置变更。数据库恢复需单独评估新写入数据，不自动覆盖生产数据。
+
 ## 跟随上游
 
 Codex 当前任务中的每日维护自动化负责检查 `upstream/main`，在维护分支合并更新、解决常规冲突并保留上述行为。通过检查后将更新合并到本仓库 `main`。若上游提供等价修复，应先验证行为与回归测试，再移除重复实现。
