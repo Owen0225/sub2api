@@ -1094,6 +1094,47 @@ func TestForwardAsRawChatCompletions_ClientDisconnectDrainsUsage(t *testing.T) {
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
 }
 
+func TestForwardAsRawChatCompletions_OptInDisconnectStopsUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Writer = &openAIRawStreamDisconnectedWriter{ResponseWriter: c.Writer}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	stream := newOpenAICompatBlockingReadCloser([]byte(`data: {"id":"chatcmpl_cancel","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"ok"}}]}` + "\n\n"))
+	defer func() { require.NoError(t, stream.Close()) }()
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       stream,
+	}}
+	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+	account := rawChatCompletionsTestAccount()
+	account.Extra = map[string]any{"cancel_upstream_on_client_disconnect": true}
+
+	type outcome struct {
+		result *OpenAIForwardResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+		done <- outcome{result, err}
+	}()
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		require.NotNil(t, got.result)
+		require.True(t, got.result.ClientDisconnect)
+		require.Zero(t, got.result.Usage.InputTokens)
+		require.Zero(t, got.result.Usage.OutputTokens)
+	case <-time.After(time.Second):
+		t.Fatal("upstream stream was not cancelled within one second")
+	}
+}
+
 func TestForwardAsRawChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

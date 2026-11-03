@@ -213,6 +213,15 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	// the outbound request (for example GLM xhigh is forwarded as max).
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(upstreamBody, upstreamModel, billingModel, originalModel)
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, upstreamBody, upstreamModel)
+	cancelOnDisconnect := clientStream && cancelCCUpstreamOnClientDisconnect(account)
+	cancelUpstream := func() {}
+	if cancelOnDisconnect {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(c.Request.Context())
+		ctx = context.WithValue(ctx, cancelCCUpstreamWithClientKey{}, true)
+		cancelUpstream = cancel
+		defer cancel()
+	}
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
 	if err != nil {
 		return nil, err
@@ -268,12 +277,15 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	var result *OpenAIForwardResult
 	var forwardErr error
 	if clientStream {
-		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body))
+		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body), cancelOnDisconnect, cancelUpstream)
 	} else {
 		result, forwardErr = s.bufferRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
 	if result != nil {
 		addOpenAIUsage(&result.Usage, bridgeUsage)
+		if cancelOnDisconnect && result.ClientDisconnect {
+			result.Usage = OpenAIUsage{}
+		}
 		result.UpstreamEndpoint = grokChatRawEndpoint
 	}
 	return result, forwardErr
@@ -308,6 +320,8 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	serviceTier *string,
 	startTime time.Time,
 	requestBodyLen int,
+	cancelOnDisconnect bool,
+	cancelUpstream context.CancelFunc,
 ) (*OpenAIForwardResult, error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -320,6 +334,13 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	var usage OpenAIUsage
 	var firstTokenMs *int
 	clientDisconnected := false
+	markDisconnected := func() {
+		clientDisconnected = true
+		if cancelOnDisconnect {
+			cancelUpstream()
+			_ = resp.Body.Close()
+		}
+	}
 	clientOutputStarted := false
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
@@ -337,7 +358,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			writeStreamHeaders()
 			for _, pending := range pendingLines {
 				if _, werr := c.Writer.WriteString(pending + "\n"); werr != nil {
-					clientDisconnected = true
+					markDisconnected()
 					logger.L().Debug("openai chat_completions raw: client disconnected, continuing to drain upstream for billing",
 						zap.Error(werr),
 						zap.String("request_id", requestID),
@@ -349,7 +370,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			clientOutputStarted = true
 		}
 		if _, werr := c.Writer.WriteString(line + "\n"); werr != nil {
-			clientDisconnected = true
+			markDisconnected()
 			logger.L().Debug("openai chat_completions raw: client disconnected, continuing to drain upstream for billing",
 				zap.Error(werr),
 				zap.String("request_id", requestID),
@@ -411,6 +432,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	scanErr := scanner.Err()
+	if cancelOnDisconnect && c.Request.Context().Err() != nil {
+		clientDisconnected = true
+	}
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 		logger.L().Warn("openai chat_completions raw: stream read error",
 			zap.Error(scanErr),
@@ -458,7 +482,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			writeStreamHeaders()
 			for _, pending := range pendingLines {
 				if _, werr := c.Writer.WriteString(pending + "\n"); werr != nil {
-					clientDisconnected = true
+					markDisconnected()
 					logger.L().Debug("openai chat_completions raw: client disconnected during final flush",
 						zap.Error(werr),
 						zap.String("request_id", requestID),
@@ -473,7 +497,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		}
 	}
 
-	return resultWithUsage(), nil
+	result := resultWithUsage()
+	result.ClientDisconnect = clientDisconnected
+	if cancelOnDisconnect && clientDisconnected {
+		result.Usage = OpenAIUsage{}
+	}
+	return result, nil
 }
 
 // ensureOpenAIChatStreamUsage 确保 raw Chat Completions 流式请求会让上游返回 usage。
