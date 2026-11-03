@@ -16,6 +16,16 @@ import (
 	"go.uber.org/zap"
 )
 
+type cancelCCUpstreamWithClientKey struct{}
+
+func cancelCCUpstreamOnClientDisconnect(account *Account) bool {
+	if account == nil || account.Extra == nil {
+		return false
+	}
+	enabled, _ := account.Extra["cancel_upstream_on_client_disconnect"].(bool)
+	return enabled
+}
+
 // forwardAnthropicViaRawChatCompletions serves /v1/messages clients through
 // an OpenAI-compatible upstream that only supports /v1/chat/completions.
 //
@@ -123,6 +133,15 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	if err != nil {
 		return nil, err
 	}
+	cancelOnDisconnect := clientStream && cancelCCUpstreamOnClientDisconnect(account)
+	cancelUpstream := func() {}
+	if cancelOnDisconnect {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(c.Request.Context())
+		ctx = context.WithValue(ctx, cancelCCUpstreamWithClientKey{}, true)
+		cancelUpstream = cancel
+		defer cancel()
+	}
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
 	if err != nil {
 		return nil, err
@@ -142,7 +161,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 
 	// 5. Convert response
 	if clientStream {
-		return s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, cancelOnDisconnect, cancelUpstream)
 	}
 	return s.bufferChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
@@ -193,12 +212,21 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	cancelOnDisconnect bool,
+	cancelUpstream context.CancelFunc,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
 	anthropicState := apicompat.NewChatCompletionsToAnthropicStreamState(originalModel)
 	clientDisconnected := false
+	markDisconnected := func() {
+		clientDisconnected = true
+		if cancelOnDisconnect {
+			cancelUpstream()
+			_ = resp.Body.Close()
+		}
+	}
 
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
@@ -215,7 +243,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			}
 			writeStreamHeaders()
 			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-				clientDisconnected = true
+				markDisconnected()
 				break
 			}
 		}
@@ -226,6 +254,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 
 	scan := s.scanCCStream(c, resp, "openai messages chat fallback", requestID, startTime, emitChunk)
 	usage := scan.Usage
+	if cancelOnDisconnect && c.Request.Context().Err() != nil {
+		clientDisconnected = true
+	}
+	if cancelOnDisconnect && clientDisconnected {
+		// Spark reports exact usage only at the end. Never bill a partial stream
+		// as if its terminal usage had arrived.
+		usage = OpenAIUsage{}
+	}
 
 	if scan.Err != nil {
 		// Broken upstream read: skip finalization so no synthetic message_stop
@@ -258,7 +294,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			}
 			writeStreamHeaders()
 			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-				clientDisconnected = true
+				markDisconnected()
 				break
 			}
 		}
@@ -266,6 +302,9 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	}
 	if !scan.SawDone {
 		logCCStreamMissingDoneSentinel("openai messages chat fallback", requestID)
+	}
+	if cancelOnDisconnect && clientDisconnected {
+		usage = OpenAIUsage{}
 	}
 
 	return &OpenAIForwardResult{
