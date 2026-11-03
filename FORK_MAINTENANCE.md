@@ -6,7 +6,8 @@
 ## 分支约定
 
 - `main`：已验证的上游代码与本仓库补丁，供后续构建使用。
-- `deployed/0.2.16-42b2aa11`：当前部署源码快照，提交 `42b2aa11d3cdc873e514f3da7c30503a45c747ba`，基于上游 v0.2.16 并含 Composite Messages dispatch 修复。2026-10-16 部署到 `192.168.31.254` Docker；健康检查及 `/v1/messages`、Chat Completions 冒烟测试通过。部署记录和备份位于服务器 `/mnt/data/appdata/sub2api/upgrade-0.2.16-42b2aa11/`。
+- `deployed/0.2.19-spark-cancel-20261103b`：当前部署源码快照，提交 `a5bde7eaa`，同步上游 `4a4a83ee5` 并为本地 Spark 账号的 Messages 与 Chat Completions 流启用客户端断连即取消。2026-11-03 部署到 `192.168.31.254` Docker，镜像 `sub2api:0.2.19-spark-cancel-20261103b`；健康检查通过。账号 59、61 的 `extra.cancel_upstream_on_client_disconnect` 为 true；取消请求按零 token 入账。部署前数据库、环境文件与 Compose 备份位于服务器 `/mnt/data/appdata/sub2api/upgrade-spark-cancel-20261103/`；旧镜像保留供应用回滚。
+- `deployed/0.2.16-42b2aa11`：历史部署源码快照，提交 `42b2aa11d3cdc873e514f3da7c30503a45c747ba`，基于上游 v0.2.16 并含 Composite Messages dispatch 修复。2026-10-16 部署到 `192.168.31.254` Docker；健康检查及 `/v1/messages`、Chat Completions 冒烟测试通过。部署记录和备份位于服务器 `/mnt/data/appdata/sub2api/upgrade-0.2.16-42b2aa11/`。
 - `deployed/0.2.16-9696082a`：上一部署源码快照，提交 `9696082a2c8c59626d8a742cd2f75a1ae22cf49c`，基于上游 v0.2.16 并保留 Composite 补丁。2026-10-15 部署；旧容器保留用于应用回滚，部署记录和备份位于服务器 `/mnt/data/appdata/sub2api/upgrade-0.2.16-9696082a2/`。
 - `deployed/0.2.15-c85c184f`：上一部署源码快照，提交 `c85c184f389baa5aa586be32ad050da281e6ee9a`，基于上游 0.2.15；升级前通过 18 个隔离回退场景验证。
 - `deployed/composite-20261008`：更早部署版本的源码快照，提交 `554b8ae72ddfa4c67babb750066695a2dcad5d6a`，基于上游 `0363b8cdba8cec3e2ba4b2dbd49c4481143fa55d`。保留所有历史部署快照。
