@@ -111,9 +111,18 @@ func TestChatFallbackResponseObservationReachesUsage(t *testing.T) {
 				account := forceChatMessagesFallbackAccount()
 				var result *OpenAIForwardResult
 				if endpoint == "messages" {
+					if tt.disconnect {
+						// 本用例验证“断开排水仍计费”的旧语义，需显式 opt-out；
+						// 默认开启时断开按零 token 入账（见 cancel 专项测试）。
+						account.Extra["cancel_upstream_on_client_disconnect"] = false
+					}
 					result, err = svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
 				} else {
 					account = forceChatResponsesFallbackAccount()
+					if tt.disconnect {
+						// 同上：responses 路径的排水语义用例需显式 opt-out。
+						account.Extra["cancel_upstream_on_client_disconnect"] = false
+					}
 					result, err = svc.Forward(context.Background(), c, account, body)
 				}
 				if tt.readError || tt.invalidTool {

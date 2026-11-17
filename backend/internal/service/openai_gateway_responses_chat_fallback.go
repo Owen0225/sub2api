@@ -121,6 +121,15 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	if err != nil {
 		return nil, err
 	}
+	cancelOnDisconnect := clientStream && cancelCCUpstreamOnClientDisconnect(account)
+	cancelUpstream := func() {}
+	if cancelOnDisconnect {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(c.Request.Context())
+		ctx = context.WithValue(ctx, cancelCCUpstreamWithClientKey{}, true)
+		cancelUpstream = cancel
+		defer cancel()
+	}
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
 	if err != nil {
 		return nil, err
@@ -136,7 +145,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	}
 
 	if clientStream {
-		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, cancelOnDisconnect, cancelUpstream)
 	}
 	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
@@ -198,6 +207,8 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	cancelOnDisconnect bool,
+	cancelUpstream context.CancelFunc,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
@@ -208,6 +219,16 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	state.ToolSearchDeclared = toolSearch
 	state.NamespaceTools = namespaceTools
 	clientDisconnected := false
+	markDisconnected := func() {
+		clientDisconnected = true
+		if cancelOnDisconnect {
+			// 客户端已走人：立刻拆除上游连接（cancel ctx + close body），
+			// 让 sendCCUpstreamRequest 里的 client-attached ctx 生效，
+			// 上游引擎几秒内中止生成，不再空烧到 max_tokens。
+			cancelUpstream()
+			_ = resp.Body.Close()
+		}
+	}
 
 	writeEvents := func(events []apicompat.ResponsesStreamEvent) {
 		if clientDisconnected || len(events) == 0 {
@@ -224,9 +245,9 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 				continue
 			}
 			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-				clientDisconnected = true
-				logger.L().Debug("openai responses chat fallback: client disconnected, continuing to drain upstream for billing",
-					zap.Error(err),
+				markDisconnected()
+				logger.L().Debug("openai responses chat fallback: client disconnected",
+					zap.Bool("cancel_on_disconnect", cancelOnDisconnect),
 					zap.String("request_id", requestID),
 				)
 				return
@@ -241,11 +262,23 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		writeEvents(events)
 	})
 
+	usage := scan.Usage
+	// write error 之外，客户端在长时间上游静默期间断开也要能被发现：
+	// gin/net-http 会在连接关闭时取消 request context。
+	if cancelOnDisconnect && c.Request.Context().Err() != nil {
+		clientDisconnected = true
+	}
+	if cancelOnDisconnect && clientDisconnected {
+		// 上游只在流末尾报告精确 usage；断开取消的流拿不到，不得把残缺流
+		// 当作已收到终端 usage 来计费（按零 token 入账）。
+		usage = OpenAIUsage{}
+	}
+
 	if scan.Err != nil {
 		return &OpenAIForwardResult{
 			RequestID:                     requestID,
 			UpstreamHeaders:               resp.Header,
-			Usage:                         scan.Usage,
+			Usage:                         usage,
 			Model:                         originalModel,
 			BillingModel:                  billingModel,
 			UpstreamModel:                 upstreamModel,
@@ -257,13 +290,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			Stream:                        true,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  scan.FirstTokenMs,
+			ClientDisconnect:              clientDisconnected,
 		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
 	}
 	if err := state.ValidateToolCallArguments(); err != nil {
 		return &OpenAIForwardResult{
 			RequestID:                     requestID,
 			UpstreamHeaders:               resp.Header,
-			Usage:                         scan.Usage,
+			Usage:                         usage,
 			Model:                         originalModel,
 			BillingModel:                  billingModel,
 			UpstreamModel:                 upstreamModel,
@@ -275,6 +309,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			Stream:                        true,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  scan.FirstTokenMs,
+			ClientDisconnect:              clientDisconnected,
 		}, fmt.Errorf("invalid tool call arguments from upstream: %w", err)
 	}
 
@@ -284,7 +319,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	if !clientDisconnected {
 		writeStreamHeaders()
 		if _, err := fmt.Fprint(c.Writer, "data: [DONE]\n\n"); err != nil {
-			clientDisconnected = true
+			markDisconnected()
 		}
 		if !clientDisconnected {
 			c.Writer.Flush()
@@ -293,11 +328,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	if !scan.SawDone {
 		logCCStreamMissingDoneSentinel("openai responses chat fallback", requestID)
 	}
+	if cancelOnDisconnect && clientDisconnected {
+		usage = OpenAIUsage{}
+	}
 
 	return &OpenAIForwardResult{
 		RequestID:                     requestID,
 		UpstreamHeaders:               resp.Header,
-		Usage:                         scan.Usage,
+		Usage:                         usage,
 		Model:                         originalModel,
 		BillingModel:                  billingModel,
 		UpstreamModel:                 upstreamModel,
@@ -309,6 +347,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		Stream:                        true,
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  scan.FirstTokenMs,
+		ClientDisconnect:              clientDisconnected,
 	}, nil
 }
 

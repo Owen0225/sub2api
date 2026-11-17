@@ -18,12 +18,23 @@ import (
 
 type cancelCCUpstreamWithClientKey struct{}
 
+// cancelCCUpstreamOnClientDisconnect decides whether streaming CC-family
+// upstream requests are canceled as soon as the client disconnects.
+//
+// 默认开启：客户端走人后继续把上游读完，会让上游引擎（尤其本地 Spark 集群）
+// 空烧到自然结束或 max_tokens 才停（幽灵流）。账号可用
+// extra.cancel_upstream_on_client_disconnect=false 显式退出，恢复旧的
+// “断开排水计费”语义；显式 true 或未设置该字段均按取消处理。
 func cancelCCUpstreamOnClientDisconnect(account *Account) bool {
-	if account == nil || account.Extra == nil {
-		return false
+	if account == nil {
+		return true
 	}
-	enabled, _ := account.Extra["cancel_upstream_on_client_disconnect"].(bool)
-	return enabled
+	if raw, ok := account.Extra["cancel_upstream_on_client_disconnect"]; ok {
+		if enabled, isBool := raw.(bool); isBool {
+			return enabled
+		}
+	}
+	return true
 }
 
 // forwardAnthropicViaRawChatCompletions serves /v1/messages clients through

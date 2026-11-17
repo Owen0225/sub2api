@@ -117,7 +117,9 @@ func TestForwardAsRawChatCompletions_ForcesStreamUsageUpstreamAndPassesUsageDown
 	require.Equal(t, 4, result.Usage.OutputTokens)
 	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	// 默认开启下 forward 返回时 deferred cancel 已执行：上游 ctx 收到取消是
+	// 预期的清理行为（整个流已读毕、usage 完整入账，见上面的断言）。
+	require.ErrorIs(t, upstream.lastReq.Context().Err(), context.Canceled)
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
 	require.Contains(t, rec.Body.String(), `"usage"`)
@@ -1162,13 +1164,54 @@ func TestForwardAsRawChatCompletions_UpstreamRequestIgnoresClientCancel(t *testi
 		cfg:          rawChatCompletionsTestConfig(),
 		httpUpstream: upstream,
 	}
+	// 显式 opt-out：断开排水语义下，上游请求保持与客户端 ctx 解绑。
 	account := rawChatCompletionsTestAccount()
+	account.Extra = map[string]any{"cancel_upstream_on_client_disconnect": false}
 
 	result, err := svc.forwardAsRawChatCompletions(reqCtx, c, account, body, "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
 	require.NoError(t, upstream.lastReq.Context().Err())
+}
+
+// 默认开启：客户端 ctx 已取消 ⇒ 上游请求 ctx 必须随之取消，且按零 token 记账。
+func TestForwardAsRawChatCompletions_DefaultCancelsUpstreamOnClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)).WithContext(reqCtx)
+	c.Request.Header.Set("Content-Type", "application/json")
+	cancel()
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-5.4","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_raw_ctx"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := &OpenAIGatewayService{
+		cfg:          rawChatCompletionsTestConfig(),
+		httpUpstream: upstream,
+	}
+	account := rawChatCompletionsTestAccount() // 无 cancel 标记 ⇒ 默认开启
+
+	result, err := svc.forwardAsRawChatCompletions(reqCtx, c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, upstream.lastReq)
+	require.Error(t, upstream.lastReq.Context().Err(), "default behavior must tie upstream request to client context")
+	require.True(t, result.ClientDisconnect)
+	require.Equal(t, OpenAIUsage{}, result.Usage)
 }
 
 func TestForwardAsChatCompletions_UnknownResponsesSupportFallbackUsesVersionedChatURL(t *testing.T) {
