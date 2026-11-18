@@ -35,6 +35,13 @@
 - 包含迁移 246–248：开启存量 Gemini/Antigravity 分组生图权限、增加受限管理密钥表、增加默认关闭的分组图片按张计费开关。部署前必须备份数据库及应用配置。
 - 应用回滚可回切旧镜像；迁移 246 修改了存量配置，回切镜像不会撤销此配置变更。数据库恢复需单独评估新写入数据，不自动覆盖生产数据。
 
+## v0.2.23 同步说明
+
+- 基线 `e4bf73e8`（0.2.22-spark-cancel-20261117a）同步上游 `2af3f1e15`（v0.2.23，含 v0.2.20–v0.2.23 四个版本），保留 Composite 原生优先、精确模型声明候选、显式路由固定及响应提交后不回退的行为；客户端断连取消补丁（默认开启、`extra.cancel_upstream_on_client_disconnect=false` 退出、覆盖 `/v1/responses`）语义不变，上游仅重叠修改了同文件的 GPT-6.2 temperature/topP 处理。
+- 上游 `2d20707f1` 重写了分组 Ultra Fast 说明文案并删除了 `service_tier=ultrafast` 字样，但未更新 `groupsOpenAIFast.spec.ts` 的断言；本地补丁 `7ea8fde33` 放宽该断言使其与文案一致，上游修复后应移除本地改动。
+- 包含迁移 249–252：usage_logs api_key cost 索引、MCP OAuth、OpenAI cache write TTL、分组强制 Ultra Fast 门控、usage rollup 非阻塞重建、渠道 Ultra Fast 计价系数。部署前必须备份数据库及应用配置；迁移 249 为非事务索引创建。
+- 后端全量测试（不带 -race，全绿）、Composite 三大回归、取消语义测试、golangci-lint、前端锁定安装、类型检查、全量 vitest（3147 用例）与构建均通过。上游 `internal/service` 包在 `-race` 下存在既有数据竞争（测试 stub 与 `gin.SetMode` 并发调用，纯净 upstream/main 同样复现，105 个用例受影响），非本次合并引入。
+
 ## 跟随上游
 
 Codex 当前任务中的每日维护自动化负责检查 `upstream/main`，在维护分支合并更新、解决常规冲突并保留上述行为。通过检查后将更新合并到本仓库 `main`。若上游提供等价修复，应先验证行为与回归测试，再移除重复实现。
