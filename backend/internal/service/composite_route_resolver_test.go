@@ -496,6 +496,21 @@ func TestCompositeRouteResolverKnownModelHasPrimaryDespiteMultipleOwners(t *test
 	}
 }
 
+func TestCompositeCandidatesPreferKimiForK31ProThenFallbackToOpenCodeGo(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{Ambiguous: true, Platforms: []string{PlatformKimi, PlatformOpenCodeGo}}, nil
+	})
+
+	decisions, err := resolver.ResolveCandidates(context.Background(), 7, "k3.1-pro", CompositeRouteEndpointChatCompletions)
+	require.NoError(t, err)
+	require.Len(t, decisions, 2)
+	require.Equal(t, PlatformKimi, decisions[0].TargetPlatform)
+	require.Equal(t, CompositeRouteSourceDetector, decisions[0].Source)
+	require.Equal(t, PlatformOpenCodeGo, decisions[1].TargetPlatform)
+	require.Equal(t, CompositeRouteSourceAccount, decisions[1].Source)
+}
+
 func TestCompositeCandidatesOnlyUseExactOwnersAndKeepExplicitRoutesPinned(t *testing.T) {
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {

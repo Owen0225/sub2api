@@ -70,7 +70,7 @@ func TestAnthropicConverterOutputCacheFields(t *testing.T) {
 				case "chat buffered":
 					result, err = service.bufferChatCompletionsAsAnthropic(ctx, response, "gpt-5.4", "gpt-5.4", "gpt-5.4", nil, nil, time.Now())
 				case "chat terminal", "chat eof":
-					result, err = service.streamChatCompletionsAsAnthropic(ctx, response, "gpt-5.4", "gpt-5.4", "gpt-5.4", nil, nil, time.Now())
+					result, err = service.streamChatCompletionsAsAnthropic(ctx, response, "gpt-5.4", "gpt-5.4", "gpt-5.4", nil, nil, time.Now(), false, func() {})
 				case "responses buffered":
 					result, err = service.handleAnthropicBufferedStreamingResponse(response, ctx, rawChatCompletionsTestAccount(), "gpt-5.4", "gpt-5.4", "gpt-5.4", time.Now())
 				default:
